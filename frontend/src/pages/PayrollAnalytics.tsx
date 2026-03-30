@@ -50,7 +50,7 @@ interface AnalyticsData {
 }
 
 // recharts v3 Formatter receives ValueType | undefined
-type RechartsValue = number | string | readonly (number | string)[] | undefined;
+type RechartsValue = number | string | (number | string)[] | undefined;
 
 // ── Mock fetch (replace with real API call when endpoint is available) ────────
 
@@ -202,7 +202,7 @@ export default function PayrollAnalytics() {
                     ))}
                   </Pie>
                   <Tooltip
-                    formatter={(v: number | string | readonly (number | string)[] | undefined) => [
+                    formatter={(v: RechartsValue) => [
                       `${String(Array.isArray(v) ? v[0] : (v ?? 0))}%`,
                       'Share',
                     ]}
