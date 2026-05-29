@@ -1,9 +1,14 @@
 /**
  * Integration tests for the DB Scaling endpoints (Parts 39, 40 & 41).
+ * Integration tests for the DB Scaling endpoints (Parts 37, 38, 39, 40, 42 & 50).
  *
+ * Issues #282 (Part 37) — connection breakdown, db settings
+ * Issues #283 (Part 38) — seq scan stats, WAL stats
  * Issues #284 (Part 39) — lock contention, unused indexes
  * Issues #285 (Part 40) — replication lag, table sizes
  * Issues #286 (Part 41) — bgwriter stats, database stats
+ * Issues #287 (Part 42) — bgwriter stats, temp file usage
+ * Issues #295 (Part 50) — database stats, block I/O stats
  *
  * Strategy
  * ─────────
@@ -36,6 +41,14 @@ const mockGetTableBloat            = jest.fn();
 const mockGetCacheHitRate          = jest.fn();
 const mockGetLongRunningTransactions = jest.fn();
 const mockGetVacuumStats           = jest.fn();
+const mockGetConnectionBreakdown   = jest.fn();
+const mockGetDbSettings            = jest.fn();
+const mockGetSeqScanStats          = jest.fn();
+const mockGetWalStats              = jest.fn();
+const mockGetBgwriterStats         = jest.fn();
+const mockGetTempFileUsage         = jest.fn();
+const mockGetDatabaseStats         = jest.fn();
+const mockGetBlockIoStats          = jest.fn();
 
 jest.mock('../services/dbScalingService.js', () => ({
   DbScalingService: jest.fn().mockImplementation(() => ({
@@ -48,6 +61,14 @@ jest.mock('../services/dbScalingService.js', () => ({
     getCacheHitRate:            mockGetCacheHitRate,
     getLongRunningTransactions: mockGetLongRunningTransactions,
     getVacuumStats:             mockGetVacuumStats,
+    getConnectionBreakdown:     mockGetConnectionBreakdown,
+    getDbSettings:              mockGetDbSettings,
+    getSeqScanStats:            mockGetSeqScanStats,
+    getWalStats:                mockGetWalStats,
+    getBgwriterStats:           mockGetBgwriterStats,
+    getTempFileUsage:           mockGetTempFileUsage,
+    getDatabaseStats:           mockGetDatabaseStats,
+    getBlockIoStats:            mockGetBlockIoStats,
     getLockContention:          mockGetLockContention,
     getUnusedIndexes:           mockGetUnusedIndexes,
     getReplicationLag:          mockGetReplicationLag,
@@ -58,6 +79,233 @@ jest.mock('../services/dbScalingService.js', () => ({
 }));
 
 afterEach(() => jest.clearAllMocks());
+
+// ─── Part 37: GET /api/v1/db-scaling/connection-breakdown ────────────────────
+
+describe('GET /api/v1/db-scaling/connection-breakdown', () => {
+  it('returns 200 with connection groups by state and application', async () => {
+    mockGetConnectionBreakdown.mockResolvedValue([
+      { state: 'active', applicationName: 'payd-api', count: 5 },
+      { state: 'idle',   applicationName: 'payd-api', count: 12 },
+    ]);
+
+    const res = await request(app).get('/api/v1/db-scaling/connection-breakdown');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toHaveLength(2);
+    expect(res.body.data[0]).toMatchObject({ state: 'active', count: 5 });
+  });
+
+  it('returns 200 with empty array when no connections exist', async () => {
+    mockGetConnectionBreakdown.mockResolvedValue([]);
+
+    const res = await request(app).get('/api/v1/db-scaling/connection-breakdown');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([]);
+  });
+
+  it('returns 500 when the service throws', async () => {
+    mockGetConnectionBreakdown.mockRejectedValue(new Error('pg error'));
+
+    const res = await request(app).get('/api/v1/db-scaling/connection-breakdown');
+
+    expect(res.status).toBe(500);
+  });
+});
+
+// ─── Part 37: GET /api/v1/db-scaling/db-settings ───────────────────────────
+
+describe('GET /api/v1/db-scaling/db-settings', () => {
+  it('returns 200 with scaling-relevant pg_settings', async () => {
+    mockGetDbSettings.mockResolvedValue([
+      { name: 'max_connections', setting: '100', unit: null, category: 'Connections and Authentication / Connection Settings' },
+      { name: 'shared_buffers',  setting: '16384', unit: '8kB', category: 'Resource Usage / Memory' },
+    ]);
+
+    const res = await request(app).get('/api/v1/db-scaling/db-settings');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data[0]).toMatchObject({ name: 'max_connections', setting: '100' });
+  });
+
+  it('returns 500 when the service throws', async () => {
+    mockGetDbSettings.mockRejectedValue(new Error('pg error'));
+
+    const res = await request(app).get('/api/v1/db-scaling/db-settings');
+
+    expect(res.status).toBe(500);
+  });
+});
+
+// ─── Part 38: GET /api/v1/db-scaling/seq-scan-stats ──────────────────────────
+
+describe('GET /api/v1/db-scaling/seq-scan-stats', () => {
+  it('returns 200 with sequential scan statistics', async () => {
+    mockGetSeqScanStats.mockResolvedValue([
+      { table: 'audit_logs', seqScans: 500, idxScans: 50, seqTupRead: 10000, idxTupFetch: 200, seqScanRatio: 0.909 },
+    ]);
+
+    const res = await request(app).get('/api/v1/db-scaling/seq-scan-stats');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data[0]).toMatchObject({ table: 'audit_logs', seqScans: 500 });
+  });
+
+  it('respects the ?limit query parameter', async () => {
+    mockGetSeqScanStats.mockResolvedValue([]);
+
+    await request(app).get('/api/v1/db-scaling/seq-scan-stats?limit=5');
+
+    expect(mockGetSeqScanStats).toHaveBeenCalledWith(5);
+  });
+
+  it('returns 400 for an invalid limit', async () => {
+    const res = await request(app).get('/api/v1/db-scaling/seq-scan-stats?limit=abc');
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('returns 500 when the service throws', async () => {
+    mockGetSeqScanStats.mockRejectedValue(new Error('pg error'));
+
+    const res = await request(app).get('/api/v1/db-scaling/seq-scan-stats');
+
+    expect(res.status).toBe(500);
+  });
+});
+
+// ─── Part 38: GET /api/v1/db-scaling/wal-stats ──────────────────────────────
+
+describe('GET /api/v1/db-scaling/wal-stats', () => {
+  it('returns 200 with WAL generation statistics', async () => {
+    mockGetWalStats.mockResolvedValue({
+      walRecords: 1000, walFpi: 50, walBytes: 5242880,
+      walBuffersFull: 2, walWrite: 100, walSync: 80,
+      walWriteTimeMs: 150, walSyncTimeMs: 200,
+    });
+
+    const res = await request(app).get('/api/v1/db-scaling/wal-stats');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toMatchObject({ walBytes: 5242880, walRecords: 1000 });
+  });
+
+  it('returns 500 when the service throws', async () => {
+    mockGetWalStats.mockRejectedValue(new Error('pg error'));
+
+    const res = await request(app).get('/api/v1/db-scaling/wal-stats');
+
+    expect(res.status).toBe(500);
+  });
+});
+
+// ─── Part 42: GET /api/v1/db-scaling/bgwriter-stats ──────────────────────────
+
+describe('GET /api/v1/db-scaling/bgwriter-stats', () => {
+  it('returns 200 with bgwriter statistics', async () => {
+    mockGetBgwriterStats.mockResolvedValue({
+      checkpointsTimed: 100, checkpointsReq: 5,
+      checkpointWriteTimeMs: 5000, checkpointSyncTimeMs: 2000,
+      buffersCheckpoint: 1000, buffersClean: 500, maxwrittenClean: 10,
+      buffersBackend: 200, buffersBackendFsync: 50, buffersAlloc: 300,
+    });
+
+    const res = await request(app).get('/api/v1/db-scaling/bgwriter-stats');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toMatchObject({ checkpointsTimed: 100, buffersCheckpoint: 1000 });
+  });
+
+  it('returns 500 when the service throws', async () => {
+    mockGetBgwriterStats.mockRejectedValue(new Error('pg error'));
+
+    const res = await request(app).get('/api/v1/db-scaling/bgwriter-stats');
+
+    expect(res.status).toBe(500);
+  });
+});
+
+// ─── Part 42: GET /api/v1/db-scaling/temp-file-usage ────────────────────────
+
+describe('GET /api/v1/db-scaling/temp-file-usage', () => {
+  it('returns 200 with temp file usage for current database', async () => {
+    mockGetTempFileUsage.mockResolvedValue({
+      database: 'payd', tempFiles: 42, tempBytes: 1048576, tempBytesPretty: '1024 kB',
+    });
+
+    const res = await request(app).get('/api/v1/db-scaling/temp-file-usage');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toMatchObject({ tempFiles: 42, tempBytes: 1048576 });
+  });
+
+  it('returns 500 when the service throws', async () => {
+    mockGetTempFileUsage.mockRejectedValue(new Error('pg error'));
+
+    const res = await request(app).get('/api/v1/db-scaling/temp-file-usage');
+
+    expect(res.status).toBe(500);
+  });
+});
+
+// ─── Part 50: GET /api/v1/db-scaling/database-stats ─────────────────────────
+
+describe('GET /api/v1/db-scaling/database-stats', () => {
+  it('returns 200 with database-wide statistics', async () => {
+    mockGetDatabaseStats.mockResolvedValue({
+      database: 'payd', numBackends: 10, xactCommit: 50000, xactRollback: 100,
+      blksRead: 1000, blksHit: 99000, cacheHitRatio: 0.99, deadlocks: 0,
+      tempFiles: 5, tempBytes: 524288,
+    });
+
+    const res = await request(app).get('/api/v1/db-scaling/database-stats');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toMatchObject({ xactCommit: 50000, cacheHitRatio: 0.99 });
+  });
+
+  it('returns 500 when the service throws', async () => {
+    mockGetDatabaseStats.mockRejectedValue(new Error('pg error'));
+
+    const res = await request(app).get('/api/v1/db-scaling/database-stats');
+
+    expect(res.status).toBe(500);
+  });
+});
+
+// ─── Part 50: GET /api/v1/db-scaling/block-io-stats ─────────────────────────
+
+describe('GET /api/v1/db-scaling/block-io-stats', () => {
+  it('returns 200 with block I/O timing statistics', async () => {
+    mockGetBlockIoStats.mockResolvedValue({
+      database: 'payd', blkReadTimeMs: 1500, blkWriteTimeMs: 800,
+      sessionTimeMs: 3600000, activeTimeMs: 1800000, idleInTransactionTimeMs: 5000,
+    });
+
+    const res = await request(app).get('/api/v1/db-scaling/block-io-stats');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toMatchObject({ blkReadTimeMs: 1500, sessionTimeMs: 3600000 });
+  });
+
+  it('returns 500 when the service throws', async () => {
+    mockGetBlockIoStats.mockRejectedValue(new Error('pg error'));
+
+    const res = await request(app).get('/api/v1/db-scaling/block-io-stats');
+
+    expect(res.status).toBe(500);
+  });
+});
 
 // ─── Part 39: GET /api/v1/db-scaling/lock-contention ─────────────────────────
 
