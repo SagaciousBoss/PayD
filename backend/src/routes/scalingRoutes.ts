@@ -2,23 +2,31 @@
  * @file src/routes/scalingRoutes.ts
  * @description REST endpoints that expose DB connection-pool health and
  *              slow-query statistics.  Part of the API & Database Scaling
- *              effort (Issue #272 / Wave #717 – Part 27).
+ *              effort (Issue #272 / Wave #717).
  *
  * Routes
  * ──────
- *   GET  /api/v1/scaling/health        – current pool snapshot
- *   GET  /api/v1/scaling/query-stats   – recent slow queries (admin only)
- *   POST /api/v1/scaling/refresh-view  – refresh the daily-summary mat-view
+ *   GET  /api/v1/scaling/health              – current pool snapshot
+ *   GET  /api/v1/scaling/query-stats         – recent slow queries
+ *   POST /api/v1/scaling/refresh-view        – refresh the daily-summary mat-view
+ *   GET  /api/v1/scaling/latency-percentiles – p50/p95/p99 per endpoint (Part 25)
+ *   GET  /api/v1/scaling/pool-history        – pool snapshots time-series (Part 25)
+ *   GET  /api/v1/scaling/xid-wraparound      – XID wraparound risk (Part 35)
+ *   GET  /api/v1/scaling/index-bloat         – index bloat estimates (Part 35)
+ *   GET  /api/v1/scaling/table-io            – per-table I/O stats (Part 35)
+ *   GET  /api/v1/scaling/autovacuum          – live autovacuum activity (Part 35)
+ *   GET  /api/v1/scaling/slow-query-agg      – slow-query aggregates (Part 35)
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { getPool, getPoolStats } from '../services/dbPoolService.js';
+import { DbScalingService } from '../services/dbScalingService.js';
 import { apiErrorResponse, ErrorCodes } from '../utils/apiError.js';
 import logger from '../utils/logger.js';
 
-const router = Router();
+const dbScalingService = new DbScalingService();
 
-// ─── GET /scaling/health ──────────────────────────────────────────────────────
+const router = Router();
 
 /**
  * @openapi

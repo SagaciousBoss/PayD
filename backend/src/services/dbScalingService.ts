@@ -734,4 +734,427 @@ export class DbScalingService {
       totalPretty: r.total_pretty,
     }));
   }
+
+  // ── Part 33 (#278) ───────────────────────────────────────────────────────
+
+  /**
+   * #278a — Query plan cache: surfaces prepared-statement plan invalidations
+   * from the `db_query_plan_cache` table, ordered by most resets first.
+   * High plan_resets values indicate plan-cache thrashing.
+   */
+  async getQueryPlanCache(limit = 20): Promise<{
+    queryHash: string;
+    queryText: string;
+    planCalls: number;
+    planResets: number;
+    lastPlanReset: string | null;
+    recordedAt: string;
+  }[]> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      query_hash: string;
+      query_text: string;
+      plan_calls: bigint;
+      plan_resets: bigint;
+      last_plan_reset: Date | null;
+      recorded_at: Date;
+    }>>`
+      SELECT query_hash, query_text, plan_calls, plan_resets,
+             last_plan_reset, recorded_at
+      FROM db_query_plan_cache
+      ORDER BY plan_resets DESC, recorded_at DESC
+      LIMIT ${limit}
+    `;
+    return rows.map(r => ({
+      queryHash:     r.query_hash,
+      queryText:     r.query_text,
+      planCalls:     Number(r.plan_calls),
+      planResets:    Number(r.plan_resets),
+      lastPlanReset: r.last_plan_reset ? r.last_plan_reset.toISOString() : null,
+      recordedAt:    r.recorded_at.toISOString(),
+    }));
+  }
+
+  /**
+   * #278b — Top tables by total on-disk size with row-count estimates.
+   * Combines pg_class size data with pg_stat_user_tables live/dead row counts.
+   */
+  async getTopTablesBySize(limit = 20): Promise<{
+    table: string;
+    totalPretty: string;
+    totalBytes: number;
+    liveRows: number;
+    deadRows: number;
+    bloatRatio: number;
+    lastVacuum: string | null;
+  }[]> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      relname: string;
+      total_pretty: string;
+      total_bytes: bigint;
+      n_live_tup: bigint;
+      n_dead_tup: bigint;
+      last_autovacuum: Date | null;
+    }>>`
+      SELECT
+        c.relname,
+        pg_size_pretty(pg_total_relation_size(c.oid)) AS total_pretty,
+        pg_total_relation_size(c.oid)                 AS total_bytes,
+        COALESCE(s.n_live_tup, 0)                     AS n_live_tup,
+        COALESCE(s.n_dead_tup, 0)                     AS n_dead_tup,
+        s.last_autovacuum
+      FROM pg_class c
+      LEFT JOIN pg_stat_user_tables s ON s.relname = c.relname
+      WHERE c.relkind = 'r'
+        AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+      ORDER BY pg_total_relation_size(c.oid) DESC
+      LIMIT ${limit}
+    `;
+    return rows.map(r => {
+      const live = Number(r.n_live_tup);
+      const dead = Number(r.n_dead_tup);
+      return {
+        table:       r.relname,
+        totalPretty: r.total_pretty,
+        totalBytes:  Number(r.total_bytes),
+        liveRows:    live,
+        deadRows:    dead,
+        bloatRatio:  live + dead > 0 ? dead / (live + dead) : 0,
+        lastVacuum:  r.last_autovacuum ? r.last_autovacuum.toISOString() : null,
+      };
+    });
+  }
+
+  /**
+   * #278c — Deadlock history: recent entries from `db_deadlock_history`,
+   * ordered newest first.
+   */
+  async getDeadlockHistory(limit = 20): Promise<{
+    id: number;
+    detectedAt: string;
+    pid1: number | null;
+    pid2: number | null;
+    relation: string | null;
+    query1: string | null;
+    query2: string | null;
+    resolved: boolean;
+    notes: string | null;
+  }[]> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      id: bigint;
+      detected_at: Date;
+      pid1: number | null;
+      pid2: number | null;
+      relation: string | null;
+      query1: string | null;
+      query2: string | null;
+      resolved: boolean;
+      notes: string | null;
+    }>>`
+      SELECT id, detected_at, pid1, pid2, relation,
+             query1, query2, resolved, notes
+      FROM db_deadlock_history
+      ORDER BY detected_at DESC
+      LIMIT ${limit}
+    `;
+    return rows.map(r => ({
+      id:         Number(r.id),
+      detectedAt: r.detected_at.toISOString(),
+      pid1:       r.pid1,
+      pid2:       r.pid2,
+      relation:   r.relation,
+      query1:     r.query1,
+      query2:     r.query2,
+      resolved:   r.resolved,
+      notes:      r.notes,
+    }));
+  }
+
+  /**
+   * #278d — Idle-in-transaction session timeout: reads the current setting
+   * from pg_settings so operators can verify migration 047 was applied.
+   */
+  async getIdleInTransactionTimeout(): Promise<{
+    setting: string;
+    unit: string | null;
+    source: string;
+  }> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      setting: string;
+      unit: string | null;
+      source: string;
+    }>>`
+      SELECT setting, unit, source
+      FROM pg_settings
+      WHERE name = 'idle_in_transaction_session_timeout'
+    `;
+    const r = rows[0] ?? { setting: '0', unit: null, source: 'default' };
+    return { setting: r.setting, unit: r.unit, source: r.source };
+  }
+
+  // ── Part 35 (#280) ───────────────────────────────────────────────────────
+
+  /**
+   * #280a — Transaction ID wraparound risk.
+   * Returns tables whose age (in transactions) is approaching the wraparound
+   * limit (2^31 ≈ 2.1 billion).  Tables with age > 1.5 billion need urgent
+   * VACUUM FREEZE attention.
+   */
+  async getXidWraparoundRisk(limit = 20): Promise<{
+    table: string;
+    schema: string;
+    age: number;
+    percentToWrap: number;
+    frozenXid: string;
+    urgency: 'ok' | 'warning' | 'critical';
+  }[]> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      relname: string;
+      nspname: string;
+      age: bigint;
+      relfrozenxid: string;
+    }>>`
+      SELECT
+        c.relname,
+        n.nspname,
+        age(c.relfrozenxid)  AS age,
+        c.relfrozenxid::text AS relfrozenxid
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind = 'r'
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY age(c.relfrozenxid) DESC
+      LIMIT ${limit}
+    `;
+    const WRAP_LIMIT = 2_147_483_648; // 2^31
+    return rows.map(r => {
+      const age = Number(r.age);
+      const pct = age / WRAP_LIMIT;
+      return {
+        table:          r.relname,
+        schema:         r.nspname,
+        age,
+        percentToWrap:  Math.round(pct * 10000) / 100,
+        frozenXid:      r.relfrozenxid,
+        urgency:        pct >= 0.9 ? 'critical' : pct >= 0.7 ? 'warning' : 'ok',
+      };
+    });
+  }
+
+  /**
+   * #280b — Index bloat estimation.
+   * Uses pg_stat_user_indexes + pg_class to surface indexes whose size is
+   * disproportionately large relative to the number of live tuples in the
+   * parent table — a proxy for bloat caused by heavy UPDATE/DELETE workloads.
+   */
+  async getIndexBloatEstimate(limit = 20): Promise<{
+    table: string;
+    index: string;
+    indexSizeBytes: number;
+    indexSizePretty: string;
+    idxScans: number;
+    liveRows: number;
+    bytesPerRow: number;
+  }[]> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      table_name: string;
+      index_name: string;
+      index_size: bigint;
+      index_size_pretty: string;
+      idx_scan: bigint;
+      n_live_tup: bigint;
+    }>>`
+      SELECT
+        t.relname                              AS table_name,
+        i.relname                              AS index_name,
+        pg_relation_size(ix.indexrelid)        AS index_size,
+        pg_size_pretty(pg_relation_size(ix.indexrelid)) AS index_size_pretty,
+        COALESCE(s.idx_scan, 0)                AS idx_scan,
+        COALESCE(st.n_live_tup, 0)             AS n_live_tup
+      FROM pg_index ix
+      JOIN pg_class t  ON t.oid  = ix.indrelid
+      JOIN pg_class i  ON i.oid  = ix.indexrelid
+      LEFT JOIN pg_stat_user_indexes s  ON s.indexrelid = ix.indexrelid
+      LEFT JOIN pg_stat_user_tables  st ON st.relid      = ix.indrelid
+      WHERE t.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+        AND NOT ix.indisprimary
+      ORDER BY pg_relation_size(ix.indexrelid) DESC
+      LIMIT ${limit}
+    `;
+    return rows.map(r => {
+      const sizeBytes = Number(r.index_size);
+      const liveRows  = Number(r.n_live_tup);
+      return {
+        table:           r.table_name,
+        index:           r.index_name,
+        indexSizeBytes:  sizeBytes,
+        indexSizePretty: r.index_size_pretty,
+        idxScans:        Number(r.idx_scan),
+        liveRows,
+        bytesPerRow:     liveRows > 0 ? Math.round(sizeBytes / liveRows) : sizeBytes,
+      };
+    });
+  }
+
+  /**
+   * #280c — Per-table I/O statistics from pg_statio_user_tables.
+   * Returns heap and index block hit/read counts so operators can identify
+   * tables with poor buffer-cache utilisation.
+   */
+  async getTableIoStats(limit = 20): Promise<{
+    table: string;
+    heapBlksRead: number;
+    heapBlksHit: number;
+    idxBlksRead: number;
+    idxBlksHit: number;
+    toastBlksRead: number;
+    toastBlksHit: number;
+    heapHitRatio: number;
+    idxHitRatio: number;
+  }[]> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      relname: string;
+      heap_blks_read: bigint;
+      heap_blks_hit: bigint;
+      idx_blks_read: bigint;
+      idx_blks_hit: bigint;
+      toast_blks_read: bigint;
+      toast_blks_hit: bigint;
+    }>>`
+      SELECT
+        relname,
+        COALESCE(heap_blks_read,  0) AS heap_blks_read,
+        COALESCE(heap_blks_hit,   0) AS heap_blks_hit,
+        COALESCE(idx_blks_read,   0) AS idx_blks_read,
+        COALESCE(idx_blks_hit,    0) AS idx_blks_hit,
+        COALESCE(toast_blks_read, 0) AS toast_blks_read,
+        COALESCE(toast_blks_hit,  0) AS toast_blks_hit
+      FROM pg_statio_user_tables
+      ORDER BY (COALESCE(heap_blks_read, 0) + COALESCE(idx_blks_read, 0)) DESC
+      LIMIT ${limit}
+    `;
+    return rows.map(r => {
+      const hr = Number(r.heap_blks_read), hh = Number(r.heap_blks_hit);
+      const ir = Number(r.idx_blks_read),  ih = Number(r.idx_blks_hit);
+      return {
+        table:         r.relname,
+        heapBlksRead:  hr,
+        heapBlksHit:   hh,
+        idxBlksRead:   ir,
+        idxBlksHit:    ih,
+        toastBlksRead: Number(r.toast_blks_read),
+        toastBlksHit:  Number(r.toast_blks_hit),
+        heapHitRatio:  hr + hh > 0 ? hh / (hr + hh) : 1,
+        idxHitRatio:   ir + ih > 0 ? ih / (ir + ih) : 1,
+      };
+    });
+  }
+
+  /**
+   * #280d — Autovacuum activity: tables currently being processed by
+   * autovacuum or autoanalyze from pg_stat_activity.
+   * Returns an empty array when no autovacuum workers are running.
+   */
+  async getAutovacuumActivity(): Promise<{
+    pid: number;
+    datname: string;
+    relname: string;
+    phase: string;
+    heapBlksTotal: number;
+    heapBlksScanned: number;
+    heapBlksVacuumed: number;
+    indexVacuumCount: number;
+    maxDeadTuples: number;
+    numDeadTuples: number;
+  }[]> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      pid: number;
+      datname: string;
+      relname: string;
+      phase: string;
+      heap_blks_total: bigint;
+      heap_blks_scanned: bigint;
+      heap_blks_vacuumed: bigint;
+      index_vacuum_count: bigint;
+      max_dead_tuples: bigint;
+      num_dead_tuples: bigint;
+    }>>`
+      SELECT
+        p.pid,
+        p.datname,
+        v.relname,
+        v.phase,
+        COALESCE(v.heap_blks_total,    0) AS heap_blks_total,
+        COALESCE(v.heap_blks_scanned,  0) AS heap_blks_scanned,
+        COALESCE(v.heap_blks_vacuumed, 0) AS heap_blks_vacuumed,
+        COALESCE(v.index_vacuum_count, 0) AS index_vacuum_count,
+        COALESCE(v.max_dead_tuples,    0) AS max_dead_tuples,
+        COALESCE(v.num_dead_tuples,    0) AS num_dead_tuples
+      FROM pg_stat_progress_vacuum v
+      JOIN pg_stat_activity p ON p.pid = v.pid
+    `;
+    return rows.map(r => ({
+      pid:               r.pid,
+      datname:           r.datname,
+      relname:           r.relname,
+      phase:             r.phase,
+      heapBlksTotal:     Number(r.heap_blks_total),
+      heapBlksScanned:   Number(r.heap_blks_scanned),
+      heapBlksVacuumed:  Number(r.heap_blks_vacuumed),
+      indexVacuumCount:  Number(r.index_vacuum_count),
+      maxDeadTuples:     Number(r.max_dead_tuples),
+      numDeadTuples:     Number(r.num_dead_tuples),
+    }));
+  }
+
+  /**
+   * #280e — Slow-query aggregation from db_query_stats.
+   * Returns per-endpoint aggregates (count, avg, p95, max) over a rolling
+   * window so operators can spot regressions without querying pg_stat_statements.
+   */
+  async getSlowQueryAggregates(windowMinutes = 60, limit = 20): Promise<{
+    endpoint: string;
+    callCount: number;
+    avgMs: number;
+    p95Ms: number;
+    maxMs: number;
+    cacheHitRate: number;
+    windowStart: string;
+  }[]> {
+    const rows = await this.prisma.$queryRaw<Array<{
+      endpoint: string;
+      call_count: bigint;
+      avg_ms: number;
+      p95_ms: number;
+      max_ms: number;
+      cache_hits: bigint;
+      window_start: Date;
+    }>>`
+      SELECT
+        endpoint,
+        count(*)                                                    AS call_count,
+        avg(execution_ms)                                           AS avg_ms,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY execution_ms) AS p95_ms,
+        max(execution_ms)                                           AS max_ms,
+        count(*) FILTER (WHERE cache_hit = TRUE)                    AS cache_hits,
+        min(recorded_at)                                            AS window_start
+      FROM db_query_stats
+      WHERE recorded_at >= NOW() - (${windowMinutes} * INTERVAL '1 minute')
+      GROUP BY endpoint
+      ORDER BY avg(execution_ms) DESC
+      LIMIT ${limit}
+    `;
+    return rows.map(r => {
+      const calls = Number(r.call_count);
+      const hits  = Number(r.cache_hits);
+      return {
+        endpoint:     r.endpoint,
+        callCount:    calls,
+        avgMs:        Math.round(r.avg_ms),
+        p95Ms:        Math.round(r.p95_ms),
+        maxMs:        r.max_ms,
+        cacheHitRate: calls > 0 ? hits / calls : 0,
+        windowStart:  r.window_start.toISOString(),
+      };
+    });
+  }
 }

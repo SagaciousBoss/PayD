@@ -1,9 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { UserRole } from '../types/auth.js';
-import { Pool } from 'pg';
-import { config } from '../config/env.js';
-
-const pool = new Pool({ connectionString: config.DATABASE_URL });
+import { pool } from '../config/database.js';
+import logger from '../utils/logger.js';
 
 export const authorizeRoles = (...roles: UserRole[]) => {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -57,7 +55,7 @@ export const isolateOrganization = async (req: Request, res: Response, next: Nex
         return res.status(403).json({ error: 'Access denied: Organization public key mismatch' });
       }
     } catch (error) {
-      console.error('Error verifying organization public key:', error);
+      logger.error({ error }, '[rbac] Error verifying organization public key');
       return res.status(500).json({ error: 'Internal server error during isolation check' });
     }
   }
