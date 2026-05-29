@@ -16,9 +16,9 @@ if (config.REDIS_URL) {
     redisClient = new Redis(config.REDIS_URL, {
       maxRetriesPerRequest: 1,
       retryStrategy: () => null, // Fail fast for health check
-      commandTimeout: 1000,      // 1 second timeout
+      commandTimeout: 1000, // 1 second timeout
     });
-    
+
     redisClient.on('error', (err) => {
       logger.warn('Health Check Redis client error', { error: err.message });
     });
@@ -76,6 +76,63 @@ function measureEventLoopLag(): Promise<number> {
 }
 
 export class HealthController {
+  /**
+   * GET /health/live  (liveness probe)
+   * Returns 200 immediately — no dependency checks. Used by k8s/Docker to
+   * confirm the process is alive. Should never block or timeout.
+   */
+  static getLiveness(_req: Request, res: Response): void {
+    res.status(200).json({
+      status: 'alive',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+    });
+  }
+
+  /**
+   * GET /health/ready  (readiness probe)
+   * Returns 200 if all critical dependencies are reachable, 503 otherwise.
+   * Used by load-balancers to gate traffic until the instance is ready.
+   */
+  static async getReadiness(_req: Request, res: Response): Promise<void> {
+    const checks: { database: DependencyStatus; redis: DependencyStatus } = {
+      database: { status: 'unknown' },
+      redis: { status: 'unknown' },
+    };
+    let ready = true;
+
+    const dbStart = Date.now();
+    try {
+      await pool.query('SELECT 1');
+      checks.database = { status: 'connected', latencyMs: Date.now() - dbStart };
+    } catch (error: any) {
+      ready = false;
+      checks.database = { status: 'disconnected', error: error.message };
+      logger.error('Readiness check: database unavailable', error);
+    }
+
+    if (redisClient) {
+      const redisStart = Date.now();
+      try {
+        await redisClient.ping();
+        checks.redis = { status: 'connected', latencyMs: Date.now() - redisStart };
+      } catch (error: any) {
+        ready = false;
+        checks.redis = { status: 'disconnected', error: error.message };
+        logger.error('Readiness check: redis unavailable', error);
+      }
+    } else {
+      checks.redis = { status: 'not_configured' };
+    }
+
+    const httpStatus = ready ? 200 : 503;
+    res.status(httpStatus).json({
+      status: ready ? 'ready' : 'not_ready',
+      timestamp: new Date().toISOString(),
+      checks,
+    });
+  }
+
   static async getHealthStatus(_req: Request, res: Response) {
     const start = Date.now();
     const statusReport: HealthStatusResponse = {

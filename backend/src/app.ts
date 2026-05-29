@@ -179,6 +179,12 @@ app.get('/api/v1/health', HealthController.getHealthStatus);
 app.get('/api/health', HealthController.getHealthStatus);
 app.get('/health', HealthController.getHealthStatus);
 
+// Kubernetes-style probes
+app.get('/api/v1/health/live', HealthController.getLiveness);
+app.get('/api/v1/health/ready', HealthController.getReadiness);
+app.get('/health/live', HealthController.getLiveness);
+app.get('/health/ready', HealthController.getReadiness);
+
 // ─── 404 ─────────────────────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({
