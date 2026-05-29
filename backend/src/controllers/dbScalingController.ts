@@ -104,6 +104,107 @@ export class DbScalingController {
     }
   }
 
+  // ── Part 37 (#282) ─────────────────────────────────────────────────────
+
+  /** #282a — Connections grouped by state and application name. */
+  async getConnectionBreakdown(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await service.getConnectionBreakdown();
+      res.json({ success: true, data });
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch connection breakdown');
+      next(err);
+    }
+  }
+
+  /** #282b — Scaling-relevant pg_settings parameters. */
+  async getDbSettings(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await service.getDbSettings();
+      res.json({ success: true, data });
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch db settings');
+      next(err);
+    }
+  }
+
+  // ── Part 38 (#283) ─────────────────────────────────────────────────────
+
+  /** #283a — Tables with high sequential scan counts. */
+  async getSeqScanStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const limit = Math.min(Number(req.query['limit'] ?? 20), 100);
+      if (isNaN(limit) || limit < 1) {
+        res.status(400).json({ success: false, error: 'limit must be a positive integer' });
+        return;
+      }
+      const data = await service.getSeqScanStats(limit);
+      res.json({ success: true, data });
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch sequential scan stats');
+      next(err);
+    }
+  }
+
+  /** #283b — WAL generation statistics. */
+  async getWalStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await service.getWalStats();
+      res.json({ success: true, data });
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch WAL stats');
+      next(err);
+    }
+  }
+
+  // ── Part 42 (#287) ─────────────────────────────────────────────────────
+
+  /** #287a — Background writer and checkpoint statistics. */
+  async getBgwriterStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await service.getBgwriterStats();
+      res.json({ success: true, data });
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch bgwriter stats');
+      next(err);
+    }
+  }
+
+  /** #287b — Temporary file usage for the current database. */
+  async getTempFileUsage(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await service.getTempFileUsage();
+      res.json({ success: true, data });
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch temp file usage');
+      next(err);
+    }
+  }
+
+  // ── Part 50 (#295) ─────────────────────────────────────────────────────
+
+  /** #295a — Database-wide transaction and conflict statistics. */
+  async getDatabaseStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await service.getDatabaseStats();
+      res.json({ success: true, data });
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch database stats');
+      next(err);
+    }
+  }
+
+  /** #295b — Block I/O timing statistics. */
+  async getBlockIoStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const data = await service.getBlockIoStats();
+      res.json({ success: true, data });
+    } catch (err) {
+      logger.error({ err }, 'Failed to fetch block I/O stats');
+      next(err);
+    }
+  }
+
   // ── Part 39 (#284) ─────────────────────────────────────────────────────
 
   /** #284a — Lock contention between concurrent backends. */
