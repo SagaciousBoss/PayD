@@ -340,6 +340,11 @@ export class PayrollBonusService {
     return result.rows[0] || null;
   }
 
+  static async getPayrollItemById(itemId: number): Promise<PayrollItem | null> {
+    const result = await pool.query('SELECT * FROM payroll_items WHERE id = $1', [itemId]);
+    return result.rows[0] || null;
+  }
+
   static async deletePayrollItem(itemId: number): Promise<boolean> {
     const item = await pool.query('SELECT payroll_run_id FROM payroll_items WHERE id = $1', [
       itemId,

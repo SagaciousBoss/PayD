@@ -265,11 +265,40 @@ export class PayrollBonusController {
   static async deletePayrollItem(req: Request, res: Response): Promise<void> {
     try {
       const { itemId } = req.params;
-      const deleted = await PayrollBonusService.deletePayrollItem(parseInt(itemId as string, 10));
+      const organizationId = req.user?.organizationId;
+      const itemIdInt = parseInt(itemId as string, 10);
+
+      // Fetch item before deletion so we can log it
+      const item = await PayrollBonusService.getPayrollItemById(itemIdInt);
+
+      if (!item) {
+        res.status(404).json({ error: 'Payroll item not found' });
+        return;
+      }
+
+      const deleted = await PayrollBonusService.deletePayrollItem(itemIdInt);
 
       if (!deleted) {
         res.status(404).json({ error: 'Payroll item not found' });
         return;
+      }
+
+      // Log audit entry for item deletion
+      if (organizationId) {
+        await PayrollAuditService.log({
+          organizationId,
+          payrollRunId: item.payroll_run_id,
+          payrollItemId: itemIdInt,
+          employeeId: item.employee_id,
+          action: 'item_deleted',
+          actorType: 'user',
+          actorId: req.user?.id?.toString(),
+          actorEmail: req.user?.email,
+          amount: item.amount,
+          ipAddress: req.ip,
+          userAgent: req.get('user-agent'),
+          metadata: { item_type: item.item_type },
+        });
       }
 
       res.json({
