@@ -2,6 +2,8 @@ import React, { useState, useRef, useCallback, useId } from 'react';
 import { Upload, AlertCircle, CheckCircle, XCircle, FileSpreadsheet, Loader2 } from 'lucide-react';
 import { useNotification } from '../hooks/useNotification';
 
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
 export interface CSVRow {
   rowNumber: number;
   data: Record<string, string>;
@@ -120,6 +122,13 @@ export const CSVUploader: React.FC<CSVUploaderProps> = ({
       if (!file.name.endsWith('.csv')) {
         setParseError('Please upload a CSV file. Other file formats are not supported.');
         notifyError('Invalid file format', 'Only .csv files are accepted.');
+        return;
+      }
+
+      if (file.size > MAX_FILE_SIZE) {
+        const maxSizeMB = (MAX_FILE_SIZE / (1024 * 1024)).toFixed(1);
+        setParseError(`File size exceeds ${maxSizeMB}MB limit. Please choose a smaller file.`);
+        notifyError('File too large', `Maximum file size is ${maxSizeMB}MB.`);
         return;
       }
 
